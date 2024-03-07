@@ -1,0 +1,12 @@
+[package]
+name = "room-reg-impl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rocket = { version = "0.5.0", features = ["http2", "json"] }
+rocket-client-addr = "0.5.4"
+ron = "0.8.1"
+serde = "1.0.197"
+serde_json = "1.0.114"
+uuid = { version = "1.7.0", features = ["serde", "v6", "v4"] }
