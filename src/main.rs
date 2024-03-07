@@ -51,8 +51,6 @@ impl Rooms {
     }
 }
 
-type RoomKey = usize;
-
 pub struct Timestamped<T> {
     time: SystemTime,
     value: T,
@@ -144,6 +142,9 @@ fn get_lobbies(shared: &State<Storage>) -> Value {
     json!({ "rooms":  serde_json::to_value(&*rooms).unwrap()})
 }
 
+// Set up a new lobby and return it's ID.
+//
+// Servers may then use this ID to authorize updates for that lobby.
 #[post("/lobby", data = "<body>")]
 fn register_lobby(
     remote_addr: &ClientRealAddr,
@@ -187,9 +188,10 @@ struct LobbyUpdate {
     players: Vec<Member>,
 }
 
+// Update a lobby's information and reset the timeout timestamp
 #[post("/lobby/<id>", data = "<body>")]
 fn update_lobby(
-    id: String,
+    id: &str,
     body: Json<LobbyUpdate>,
     shared: &State<Storage>,
 ) -> (ContentType, Status) {
