@@ -1,0 +1,4 @@
+Config(
+    port: 3000,
+    timeout_seconds: 30
+)
