@@ -172,8 +172,6 @@ fn register_lobby(
 
     assert!(room.externalGuid.is_empty());
     assert!(room.id.is_empty());
-    room.externalGuid = uuid.to_string();
-    room.id = uuid.to_string();
     if room.address.is_none() {
         room.address = Some(remote_addr);
     }
@@ -186,6 +184,9 @@ fn register_lobby(
         eprintln!("UUID conflict");
         return Err(Status::InternalServerError);
     };
+
+    room.externalGuid = uuid.to_string();
+    room.id = uuid.to_string();
 
     Ok(Json(room))
 }
