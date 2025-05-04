@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+easy-repl = "0.2.1"
+owo-colors = "4.2.0"
 rocket = { version = "0.5.0", features = ["http2", "json"] }
 rocket-client-addr = "0.5.4"
 ron = "0.8.1"

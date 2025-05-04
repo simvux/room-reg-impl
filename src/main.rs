@@ -1,8 +1,9 @@
+use owo_colors::OwoColorize;
 use rocket::http::{ContentType, Status};
 use rocket::serde::json::{json, Json, Value};
 use rocket::{delete, get, launch, post, routes, State};
 use rocket_client_addr::ClientRealAddr;
-use serde::{ser::SerializeSeq, Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
@@ -14,90 +15,20 @@ use uuid::Uuid;
 pub struct Config {
     port: u16,
     timeout_seconds: u64,
-    // filters: HashMap<String, Vec<filter::Rule>>,
+    user_limits: HashMap<IpAddr, u16>,
 }
 
+mod cli;
 mod limit;
+mod tag;
 use limit::UsageTracker;
+use tag::Tagged;
 mod fake;
 mod filter;
+mod rooms;
+use rooms::{Member, Room, Rooms};
 
 type Storage = Arc<RwLock<Rooms>>;
-
-struct Rooms {
-    rooms: HashMap<Uuid, Timestamped<Room>>,
-    usage: UsageTracker,
-}
-
-impl Serialize for Rooms {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut seq = serializer.serialize_seq(Some(self.rooms.len()))?;
-        for room in self.rooms.values() {
-            seq.serialize_element(&room.value)?;
-        }
-        seq.end()
-    }
-}
-
-impl Rooms {
-    fn new() -> Self {
-        Self {
-            rooms: HashMap::new(),
-            usage: UsageTracker::new(),
-        }
-    }
-}
-
-pub struct Timestamped<T> {
-    time: SystemTime,
-    value: T,
-}
-
-impl<T> Timestamped<T> {
-    pub fn now(value: T) -> Self {
-        Self {
-            value,
-            time: SystemTime::now(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[allow(non_snake_case)]
-struct Room {
-    #[serde(default = "String::new")]
-    externalGuid: String,
-    #[serde(default = "String::new")]
-    id: String,
-    address: Option<IpAddr>,
-    name: String,
-    #[serde(default = "String::new")]
-    description: String,
-    #[serde(default = "String::new")]
-    owner: String,
-    port: u16,
-    preferredGameName: String,
-    preferredGameId: u64,
-    maxPlayers: u32,
-    netVersion: u32,
-    hasPassword: bool,
-    #[serde(default = "Vec::new")]
-    players: Vec<Member>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[allow(non_snake_case)]
-#[rustfmt::skip]
-struct Member {
-    #[serde(default = "String::new")] nickname: String,
-    #[serde(default = "String::new")] username: String,
-    #[serde(default = "String::new")] gameName: String,
-    #[serde(default = "String::new")] avatarUrl: String,
-    gameId: u64,
-}
 
 #[launch]
 fn rocket() -> _ {
@@ -107,7 +38,7 @@ fn rocket() -> _ {
     };
     let timeout_seconds = config.timeout_seconds;
 
-    let roomref = Arc::new(RwLock::new(Rooms::new()));
+    let roomref = Arc::new(RwLock::new(Rooms::new(config.user_limits)));
 
     // Periodically remove rooms that haven't refreshed themselves
     let rr = roomref.clone();
@@ -120,6 +51,10 @@ fn rocket() -> _ {
         }
     });
 
+    // Command-line interface
+    let rr = roomref.clone();
+    std::thread::spawn(move || cli::listener(rr));
+
     rocket::build()
         .configure(rocket::Config::figment().merge(("port", config.port)))
         .manage(roomref)
@@ -131,10 +66,20 @@ fn rocket() -> _ {
                 update_lobby,
                 delete_lobby,
                 get_profile,
+                post_profile,
+                silence_telemetry,
+                silence_jwt_post,
+                silence_jst_empty_post,
                 ok_for_token_retrieval,
                 ok_for_pkey_retrieval
             ],
         )
+}
+
+#[post("/profile", data = "<body>")]
+fn post_profile(body: String) -> Value {
+    println!("{body}");
+    json!({})
 }
 
 // Client refuses to allow a token if it hasn't been verified.
@@ -158,27 +103,25 @@ fn register_lobby(
     body: Json<Room>,
     shared: &State<Storage>,
 ) -> Result<Json<Room>, Status> {
-    let remote_addr = remote_addr.ip;
-
     let mut room = body.into_inner();
-
     let mut info = shared.write().unwrap();
 
-    info.usage
-        .increase(remote_addr)
-        .map_err(|_| Status::TooManyRequests)?;
+    info.usage.increase(remote_addr.ip).map_err(|_| {
+        println!("\"{}\" was block by usage limits", &room.name);
+        Status::TooManyRequests
+    })?;
+
+    println!("{} \"{}\"", "Registering".green(), &room.name);
 
     let uuid = Uuid::new_v4();
 
-    assert!(room.externalGuid.is_empty());
-    assert!(room.id.is_empty());
     if room.address.is_none() {
-        room.address = Some(remote_addr);
+        room.address = Some(remote_addr.ip);
     }
 
     if info
         .rooms
-        .insert(uuid, Timestamped::now(room.clone()))
+        .insert(uuid, Tagged::now(room.clone(), remote_addr.ip))
         .is_some()
     {
         eprintln!("UUID conflict");
@@ -223,10 +166,23 @@ fn delete_lobby(id: String, shared: &State<Storage>) {
     let mut info = shared.write().unwrap();
 
     if let Some(room) = info.rooms.remove(&uuid) {
-        if let Some(addr) = &room.value.address {
-            info.usage.decrease(addr);
-        }
+        info.usage.decrease(&room.real_ip);
     }
+}
+
+#[post("/jwt/external/<_token>", data = "<_body>")]
+fn silence_jwt_post(_token: String, _body: String) -> (ContentType, &'static str) {
+    (ContentType::Plain, "")
+}
+
+#[post("/jwt/external", data = "<_body>")]
+fn silence_jst_empty_post(_body: Vec<u8>) -> (ContentType, &'static str) {
+    (ContentType::Plain, "")
+}
+
+#[post("/telemetry")]
+fn silence_telemetry() -> (ContentType, &'static str) {
+    (ContentType::Plain, "")
 }
 
 #[get("/jwt/external/key.pem")]
@@ -239,26 +195,4 @@ fn ok_for_pkey_retrieval() -> (ContentType, &'static str) {
 #[post("/jwt/internal", data = "<_body>")]
 fn ok_for_token_retrieval(_body: String) -> (ContentType, &'static str) {
     (ContentType::HTML, fake::JWT_TOKEN)
-}
-
-impl Rooms {
-    pub fn remove_timed_out_lobbies(&mut self, timeout: Duration) {
-        let now = SystemTime::now();
-        self.rooms.retain(|_, room| {
-            let keep = now
-                .duration_since(room.time)
-                .map(|dur| dur < timeout)
-                .unwrap_or(true);
-
-            if !keep {
-                println!("timing out room {}", room.value.name);
-
-                if let Some(addr) = &room.value.address {
-                    self.usage.decrease(addr);
-                }
-            }
-
-            keep
-        })
-    }
 }

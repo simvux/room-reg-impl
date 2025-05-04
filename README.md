@@ -4,6 +4,8 @@ This backend is meant to be an in-place replacement for the recently lost server
 
 It does not rely on any code or infrastructure from the project that was shut-down. 
 
+*This repository is not for hosting a dedicated game server, it's for hosting the actual lobby browser web service*
+
 ### Changing client API URL
 
 To switch your client to use a different web url; visit the folder `<configuration-folder>/qt-config.ini` and change these fields (while the client *is not running*)
@@ -26,7 +28,10 @@ Make sure you have a valid ron configuration file in the runtime folder.
 // config.ron
 Config(
     port: 3000,
-    timeout_seconds: 30 // never set this to below 20 if you want to support normal clients
+    timeout_seconds: 30, // never set this to below 20 if you want to support normal clients
+    user_limits: {
+        "ip-address": 4, // set the maximum amount of room allowed by IP
+    },
 )
 ```
 
