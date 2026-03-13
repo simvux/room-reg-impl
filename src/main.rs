@@ -1,8 +1,9 @@
 use owo_colors::OwoColorize;
 use rocket::http::{ContentType, Status};
+use rocket::request::{FromRequest, Outcome};
 use rocket::serde::json::{json, Json, Value};
-use rocket::{delete, get, launch, post, routes, State};
-use rocket_client_addr::ClientRealAddr;
+use rocket::{delete, get, launch, post, routes, Request, State};
+use rocket_client_addr::ClientAddr;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -94,20 +95,53 @@ fn get_lobbies(shared: &State<Storage>) -> Value {
     json!({ "rooms":  serde_json::to_value(&*rooms).unwrap()})
 }
 
+// The clients don't support HTTP redirects, so if I need to proxy incoming connections I need to
+// do it through a reverse proxy.
+//
+// But by using a reverse proxy, the client IP address will be of that of the proxy. This lets the
+// proxy attach the real originating IP as a header without having to inspect the JSON body.
+struct LdnOrigin(Option<IpAddr>);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for LdnOrigin {
+    type Error = ();
+
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let header = LdnOrigin(request.headers().get_one("Ldn-Origin").and_then(|str| {
+            match str.parse::<IpAddr>() {
+                Ok(ip) => Some(ip),
+                Err(err) => {
+                    eprintln!("invalid ip from reroute: {err}");
+                    None
+                }
+            }
+        }));
+
+        Outcome::Success(header)
+    }
+}
+
 // Set up a new lobby and return it's ID.
 //
 // Servers may then use this ID to authorize updates for that lobby.
 #[post("/lobby", data = "<body>")]
 fn register_lobby(
-    remote_addr: &ClientRealAddr,
+    ldn_origin: Option<LdnOrigin>,
+    remote_addr: &ClientAddr,
     body: Json<Room>,
     shared: &State<Storage>,
 ) -> Result<Json<Room>, Status> {
     let mut room = body.into_inner();
     let mut info = shared.write().unwrap();
 
-    info.usage.increase(remote_addr.ip).map_err(|_| {
-        println!("\"{}\" was block by usage limits", &room.name);
+    let mut ldn_origin_ip = remote_addr.ip;
+    if let Some(LdnOrigin(Some(ip))) = ldn_origin {
+        println!("rerouting {} -> {ldn_origin_ip}", remote_addr.ip);
+        ldn_origin_ip = ip;
+    }
+
+    info.usage.increase(ldn_origin_ip).map_err(|_| {
+        println!("\"{}\" was blocked by usage limits", &room.name);
         Status::TooManyRequests
     })?;
 
@@ -116,12 +150,12 @@ fn register_lobby(
     let uuid = Uuid::new_v4();
 
     if room.address.is_none() {
-        room.address = Some(remote_addr.ip);
+        room.address = Some(ldn_origin_ip);
     }
 
     if info
         .rooms
-        .insert(uuid, Tagged::now(room.clone(), remote_addr.ip))
+        .insert(uuid, Tagged::now(room.clone(), ldn_origin_ip))
         .is_some()
     {
         eprintln!("UUID conflict");
